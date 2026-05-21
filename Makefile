@@ -1,5 +1,6 @@
 SRC = main.c \
-	  print.c
+	  print.c \
+	  icmp.c 
 
 SRCDIR = src/
 OBJDIR = objects/

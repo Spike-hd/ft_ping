@@ -5,38 +5,39 @@ t_stats g_stats = {0};
 void sigint_handler(int sig)
 {
 	(void)sig;
-	struct timeval end_time;
-	gettimeofday(&end_time, NULL);
-	
-	// Temps total d'exécution du programme
-	double total_time = (end_time.tv_sec - g_stats.start_time.tv_sec) * 1000.0 + (end_time.tv_usec - g_stats.start_time.tv_usec) / 1000.0;
-	
-	// Calcul du pourcentage de perte					
-	long loss = 0;
-	if (g_stats.packets_transmitted > 0)
-		loss = ((g_stats.packets_transmitted - g_stats.packets_received) * 100) / g_stats.packets_transmitted;
-
-	printf("\n--- %s ping statistics ---\n", g_stats.dest_name);
-	printf("%ld packets transmitted, %ld received, %ld%% packet loss, time %.0fms\n", g_stats.packets_transmitted, g_stats.packets_received, loss, total_time);
-		   
-	if (g_stats.packets_received > 0) {
-		double avg = g_stats.sum_time / g_stats.packets_received;
-		double variance = (g_stats.sum_sq_rtt / g_stats.packets_received) - (avg * avg);
-		double mdev = sqrt(variance > 0 ? variance : 0);
-		printf("round-trip min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms\n", g_stats.rtt_min, avg, g_stats.rtt_max, mdev);
-	}
-	exit(0);
+	g_stats.stop = 1;
 }
 
-void save_stats_info(double time_ms)
+int parse_args(int ac, char **av, char **dest_str, int *verbose)
 {
-	g_stats.packets_received++;
-	g_stats.sum_time += time_ms;
-	g_stats.sum_sq_rtt += (time_ms * time_ms);
-	if (g_stats.packets_received == 1 || time_ms < g_stats.rtt_min)
-		g_stats.rtt_min = time_ms;
-	if (time_ms > g_stats.rtt_max)
-		g_stats.rtt_max = time_ms;
+	*dest_str = NULL;
+	*verbose = 0;
+
+	for (int i = 1; i < ac; i++) {
+		if (strcmp(av[i], "-?") == 0 || strcmp(av[i], "--help") == 0) {
+			print_usage();
+			return 1;
+		} else if (strcmp(av[i], "-v") == 0) {
+			*verbose = 1;
+		} else if (av[i][0] == '-') {
+			printf("ft_ping: invalid option -- '%s'\n", av[i]);
+			print_usage();
+			return 1;
+		} else if (!*dest_str) {
+			*dest_str = av[i];
+		} else {
+			printf("ft_ping: too many destinations\n");
+			print_usage();
+			return 1;
+		}
+	}
+	
+	if (!*dest_str) {
+		printf("ft_ping: destination required\n");
+		print_usage();
+		return 1;
+	}
+	return 0;
 }
 
 int get_dest(char *av, struct sockaddr_in *dest)
@@ -59,21 +60,7 @@ int get_dest(char *av, struct sockaddr_in *dest)
 	return 0;
 }
 
-void build_icmp_packet(struct icmp_packet *packet)
-{
-	memset(packet, 0, sizeof(struct icmp_packet));
-	
-	// On remplit le payload avec des données
-	for (int i = 0; i < PAYLOAD_SIZE; i++) {
-		packet->data[i] = i; 
-	}
-	
-	packet->header.icmp_type = ICMP_ECHO;           // Type: Echo Request (8)
-	packet->header.icmp_code = 0;                   // Code: 0
-	packet->header.icmp_id = htons(getpid());       // ID: utilise le PID du processus
-	packet->header.icmp_seq = htons(0);             // Numéro de séquence
-	packet->header.icmp_cksum = icmp_checksum((struct icmp *)packet, sizeof(struct icmp_packet)); // Calcul du checksum
-}
+
 
 int create_socket()
 {
@@ -92,6 +79,123 @@ int create_socket()
 
 	return sockfd;
 }
+
+void save_stats_info(double time_ms)
+{
+	g_stats.packets_received++;
+	g_stats.sum_time += time_ms;
+	g_stats.sum_sq_rtt += (time_ms * time_ms);
+	if (g_stats.packets_received == 1 || time_ms < g_stats.rtt_min)
+		g_stats.rtt_min = time_ms;
+	if (time_ms > g_stats.rtt_max)
+		g_stats.rtt_max = time_ms;
+}
+
+int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, int verbose)
+{
+	struct sockaddr_in sender;
+	socklen_t sender_len;
+	char buffer[1024];
+	struct timeval start, end;
+	uint16_t seq = 0; // On va gérer la séquence directement ici
+
+	while (!g_stats.stop) {
+		uint16_t current_seq = seq++;
+
+		// 1. On inscrit le temps actuel dans la payload (data)
+		gettimeofday(&start, NULL);
+		memcpy(packet->data, &start, sizeof(struct timeval));
+
+		// 2. On finalise l'en-tête (séquence et checksum) avant d'envoyer
+		packet->seq = htons(current_seq);
+		packet->checksum = 0;
+		packet->checksum = icmp_checksum(packet, sizeof(*packet));
+
+		ssize_t bytes_sent = sendto(sockfd, packet, sizeof(*packet), 0, (struct sockaddr *)dest, sizeof(*dest));
+		if (bytes_sent < 0) {
+			return error_msg("Error during data sent\n");
+		}
+		g_stats.packets_transmitted++;
+		
+		// BOUCLE INTERNE : On lit jusqu'à avoir notre ECHOREPLY ou un timeout
+		while (!g_stats.stop) {
+			sender_len = sizeof(sender);
+			ssize_t bytes_recv = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr *)&sender, &sender_len);
+			if (bytes_recv < 0) {
+				if (errno == EINTR)
+					break;
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					if (verbose) {
+						printf("Request timeout for icmp_seq=%u\n", current_seq);
+					}
+					break;
+				} else {
+					return error_msg("Error for data recieved\n");
+				}
+			}
+
+			gettimeofday(&end, NULL);
+			if (bytes_recv < (ssize_t)sizeof(struct ip))
+				continue;
+			struct ip *ip_hdr_recv = (struct ip *)buffer;
+			int ip_hdr_len = ip_hdr_recv->ip_hl << 2;
+
+			if (ip_hdr_len < (int)sizeof(struct ip)
+				|| bytes_recv < ip_hdr_len + (ssize_t)ICMP_MINLEN)
+				continue;
+			ssize_t icmp_len = bytes_recv - ip_hdr_len;
+
+			// On "calque" notre structure icmp_packet sur la réception
+			struct icmp_packet *recv_packet = (struct icmp_packet *)(buffer + ip_hdr_len);
+
+			// Filtre : est-ce que c'est bien NOTRE réponse ?
+			if (recv_packet->type == ICMP_ECHOREPLY && recv_packet->id == htons(getpid() & 0xFFFF)) {
+				struct timeval sent_time;
+				double time_ms;
+
+				if (bytes_recv < ip_hdr_len + (ssize_t)(ICMP_MINLEN + sizeof(sent_time)))
+					continue;
+				memcpy(&sent_time, recv_packet->data, sizeof(sent_time));
+				time_ms = (end.tv_sec - sent_time.tv_sec) * 1000.0
+					+ (end.tv_usec - sent_time.tv_usec) / 1000.0;
+
+				save_stats_info(time_ms);
+
+				printf("%zd bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
+					icmp_len,
+					inet_ntoa(sender.sin_addr),
+					ntohs(recv_packet->seq),
+					ip_hdr_recv->ip_ttl,
+					time_ms);
+				
+				// On sort de la boucle de lecture puisqu'on a notre réponse
+				break;
+			} else if (verbose && is_icmp_error(recv_packet->type)) {
+				uint16_t error_seq;
+				double time_ms_verb;
+
+				if (!icmp_error_matches((char *)recv_packet, icmp_len, &error_seq))
+					continue;
+				time_ms_verb = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
+				printf("%zd bytes from %s: icmp_seq=%u icmp_type=%d icmp_code=%d ttl=%d time=%.3f ms\n",
+					icmp_len,
+					inet_ntoa(sender.sin_addr),
+					error_seq,
+					recv_packet->type,
+					recv_packet->code,
+					ip_hdr_recv->ip_ttl,
+					time_ms_verb);
+				if (error_seq == current_seq)
+					break;
+			}
+		}
+
+		if (!g_stats.stop)
+			sleep(1);
+	}
+	return 0;
+}
+
 int main(int ac, char **av)
 {
 	int sockfd;
@@ -99,30 +203,10 @@ int main(int ac, char **av)
 	struct icmp_packet packet;
 	char *dest_str;
 	int verbose = 0;
+	struct sigaction sa;
 
-	// TODO : Modifier le premier if, ac peut etre different de 2 si options sont utilisées, il faudra les gérer
-	// TODO : Ajouter la gestion des options (ex: -v pour verbose)
-	if (ac != 2 && ac != 3)
-	{
-		printf("Error, invalid number of arguments\nUsage: ./ft_ping [options] <destination>\n");
-		return 1;
-	}
-	if (ac == 3)
-	{
-		if (strcmp(av[1], "-?") == 0 || strcmp(av[1], "--help") == 0)
-			return error_msg("Usage: ./ft_ping [options] <destination>\nOptions:\n  -v\tVerbose output\n  -? or --help\tShow this help message\n");
-		else if (strcmp(av[1], "-v") == 0)
-		{
-			dest_str = av[2];
-			verbose = 1;
-		}
-		else
-		{
-			return error_msg("Error, invalid option\nUsage: ./ft_ping [options] <destination>\n");
-		}
-	} else {
-		dest_str = av[1];
-	}
+	if (parse_args(ac, av, &dest_str, &verbose))
+		return 0;
 
 	// Calcul de dest
 	if (get_dest(dest_str, &dest)) {
@@ -138,7 +222,13 @@ int main(int ac, char **av)
 	// On initialise les infos globales juste avant de commencer la boucle
 	g_stats.dest_name = dest_str;
 	gettimeofday(&g_stats.start_time, NULL);
-	signal(SIGINT, sigint_handler);
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = sigint_handler;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGINT, &sa, NULL) < 0) {
+		close(sockfd);
+		return error_msg("problem while setting signal handler\n");
+	}
 
 	// construction de icmp
 	build_icmp_packet(&packet);
@@ -146,114 +236,7 @@ int main(int ac, char **av)
 	ping_loop(&packet, sockfd, &dest, verbose);
 
 	close(sockfd);
+	if (g_stats.stop)
+		print_stats();
 	return 0;
 }
-
-int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, int verbose)
-{
-	struct sockaddr_in sender;
-	socklen_t sender_len = sizeof(sender);
-	char buffer[1024];
-	struct timeval start, end;
-	uint16_t seq = 0; // On va gérer la séquence directement ici
-
-	while (1) {
-		// 1. On inscrit le temps actuel dans la payload (data)
-		gettimeofday(&start, NULL);
-		memcpy(packet->data, &start, sizeof(struct timeval));
-
-		// 2. On finalise l'en-tête (séquence et checksum) avant d'envoyer
-		packet->header.icmp_seq = htons(seq++);
-		packet->header.icmp_cksum = 0;
-		packet->header.icmp_cksum = icmp_checksum((struct icmp *)packet, sizeof(*packet));
-
-		ssize_t bytes_sent = sendto(sockfd, packet, sizeof(*packet), 0, (struct sockaddr *)dest, sizeof(*dest));
-		if (bytes_sent < 0) { 
-			close(sockfd);
-			return error_msg("Error during data sent\n");
-		}
-		g_stats.packets_transmitted++;
-		
-		// BOUCLE INTERNE : On lit jusqu'à avoir notre ECHOREPLY ou un timeout
-		while (1) {
-			ssize_t bytes_recv = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr *)&sender, &sender_len);
-			if (bytes_recv < 0) {
-				if (errno == EAGAIN || errno == EWOULDBLOCK) {
-					if (verbose) {
-						printf("Request timeout for icmp_seq=%u\n", ntohs(packet->header.icmp_seq));
-					}
-					break; 
-				} else {
-					close(sockfd);
-					return error_msg("Error for data recieved\n");
-				}
-			}
-
-			gettimeofday(&end, NULL);
-			struct ip *ip_hdr_recv = (struct ip *)buffer;
-			int ip_hdr_len = ip_hdr_recv->ip_hl << 2;
-
-			if (bytes_recv < ip_hdr_len + (ssize_t)ICMP_MINLEN)
-				continue;
-
-			// On "calque" notre structure icmp_packet sur la réception
-			struct icmp_packet *recv_packet = (struct icmp_packet *)(buffer + ip_hdr_len);
-			struct timeval *sent_time = (struct timeval *)recv_packet->data;
-
-			// Filtre : est-ce que c'est bien NOTRE réponse ?
-			if (recv_packet->header.icmp_type == ICMP_ECHOREPLY && recv_packet->header.icmp_id == htons(getpid())) {
-				double time_ms = (end.tv_sec - sent_time->tv_sec) * 1000.0
-					+ (end.tv_usec - sent_time->tv_usec) / 1000.0;
-
-				save_stats_info(time_ms);
-
-				printf("%zd bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
-					bytes_recv - ip_hdr_len,
-					inet_ntoa(sender.sin_addr),
-					ntohs(recv_packet->header.icmp_seq),
-					ip_hdr_recv->ip_ttl,
-					time_ms);
-				
-				// On sort de la boucle de lecture puisqu'on a notre réponse
-				break;
-			} else if (verbose && recv_packet->header.icmp_type != ICMP_ECHO) {
-				// En verbose, on affiche aussi les paquets bizarres que le système aurait pu nous envoyer, mais on ignore nos propres ECHOs
-				double time_ms_verb = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
-				printf("%zd bytes from %s: icmp_type=%d icmp_code=%d ttl=%d time=%.3f ms\n",
-					bytes_recv - ip_hdr_len,
-					inet_ntoa(sender.sin_addr),
-					recv_packet->header.icmp_type,
-					recv_packet->header.icmp_code,
-					ip_hdr_recv->ip_ttl,
-					time_ms_verb);
-			}
-		}
-
-		sleep(1);
-	}
-	return 0;
-}
-
-
-u_short icmp_checksum(struct icmp *icmp_pkt, int len)
-{
-	uint32_t checksum32 = 0;
-	uint16_t *ptr = (uint16_t *)icmp_pkt;
-
-	// 1. Additionner tous les mots de 16 bits
-	while (len > 1) {
-		checksum32 += *ptr++;
-		len -= 2;
-	}
-	// 2. Si taille impaire, ajouter le dernier octet
-	if (len == 1) {
-		checksum32 += *(uint8_t *)ptr;
-	}
-	// 3. Replier les dépassements
-	while (checksum32 >> 16) {
-		checksum32 = (checksum32 & 0xFFFF) + (checksum32 >> 16);
-	}
-	// 4. Complément à un
-	return (uint16_t)(~checksum32);
-}
- 
