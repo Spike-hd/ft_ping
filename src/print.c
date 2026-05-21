@@ -21,20 +21,13 @@ int is_icmp_error(uint8_t type)
 
 void print_stats(void)
 {
-	struct timeval end_time;
-
-	gettimeofday(&end_time, NULL);
-	
-	// Temps total d'exécution du programme
-	double total_time = (end_time.tv_sec - g_stats.start_time.tv_sec) * 1000.0 + (end_time.tv_usec - g_stats.start_time.tv_usec) / 1000.0;
-	
 	// Calcul du pourcentage de perte					
 	long loss = 0;
 	if (g_stats.packets_transmitted > 0)
 		loss = ((g_stats.packets_transmitted - g_stats.packets_received) * 100) / g_stats.packets_transmitted;
 
 	printf("\n--- %s ping statistics ---\n", g_stats.dest_name);
-	printf("%ld packets transmitted, %ld received, %ld%% packet loss, time %.0fms\n", g_stats.packets_transmitted, g_stats.packets_received, loss, total_time);
+	printf("%ld packets transmitted, %ld packets received, %ld%% packet loss\n", g_stats.packets_transmitted, g_stats.packets_received, loss);
 		   
 	if (g_stats.packets_received > 0) {
 		double avg = g_stats.sum_time / g_stats.packets_received;
