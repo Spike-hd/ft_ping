@@ -9,27 +9,34 @@ void sigint_handler(int sig)
 	gettimeofday(&end_time, NULL);
 	
 	// Temps total d'exécution du programme
-	double total_time = (end_time.tv_sec - g_stats.start_time.tv_sec) * 1000.0 +
-						(end_time.tv_usec - g_stats.start_time.tv_usec) / 1000.0;
+	double total_time = (end_time.tv_sec - g_stats.start_time.tv_sec) * 1000.0 + (end_time.tv_usec - g_stats.start_time.tv_usec) / 1000.0;
 	
+	// Calcul du pourcentage de perte					
 	long loss = 0;
-	if (g_stats.packets_transmitted > 0) {
+	if (g_stats.packets_transmitted > 0)
 		loss = ((g_stats.packets_transmitted - g_stats.packets_received) * 100) / g_stats.packets_transmitted;
-	}
 
 	printf("\n--- %s ping statistics ---\n", g_stats.dest_name);
-	printf("%ld packets transmitted, %ld received, %ld%% packet loss, time %.0fms\n",
-		   g_stats.packets_transmitted, g_stats.packets_received, loss, total_time);
+	printf("%ld packets transmitted, %ld received, %ld%% packet loss, time %.0fms\n", g_stats.packets_transmitted, g_stats.packets_received, loss, total_time);
 		   
 	if (g_stats.packets_received > 0) {
-		double avg = g_stats.sum_rtt / g_stats.packets_received;
+		double avg = g_stats.sum_time / g_stats.packets_received;
 		double variance = (g_stats.sum_sq_rtt / g_stats.packets_received) - (avg * avg);
-		double stddev = sqrt(variance > 0 ? variance : 0);
-		
-		printf("round-trip min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms\n",
-			   g_stats.min_rtt, avg, g_stats.max_rtt, stddev);
+		double mdev = sqrt(variance > 0 ? variance : 0);
+		printf("round-trip min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms\n", g_stats.rtt_min, avg, g_stats.rtt_max, mdev);
 	}
 	exit(0);
+}
+
+void save_stats_info(double time_ms)
+{
+	g_stats.packets_received++;
+	g_stats.sum_time += time_ms;
+	g_stats.sum_sq_rtt += (time_ms * time_ms);
+	if (g_stats.packets_received == 1 || time_ms < g_stats.rtt_min)
+		g_stats.rtt_min = time_ms;
+	if (time_ms > g_stats.rtt_max)
+		g_stats.rtt_max = time_ms;
 }
 
 int get_dest(char *av, struct sockaddr_in *dest)
@@ -47,15 +54,7 @@ int get_dest(char *av, struct sockaddr_in *dest)
 	if (getaddrinfo(av, NULL, &hints, &res) != 0) {
 		return 1;
 	}
-
 	memcpy(dest, res->ai_addr, res->ai_addrlen);
-
-	// [DEBUG]
-	// Pour voir la conversion de l'adresse en string vers l'adresse IP
-	// char ip_str[INET_ADDRSTRLEN];
-	// inet_ntop(AF_INET, &(dest->sin_addr), ip_str, sizeof(ip_str));
-	// printf("address = %s\n", ip_str);
-
 	freeaddrinfo(res);
 	return 0;
 }
@@ -111,12 +110,11 @@ int main(int ac, char **av)
 	if (ac == 3)
 	{
 		if (strcmp(av[1], "-?") == 0 || strcmp(av[1], "--help") == 0)
-			return error_msg("Usage: ./ft_ping [-v ] <destination>\n");
+			return error_msg("Usage: ./ft_ping [options] <destination>\nOptions:\n  -v\tVerbose output\n  -? or --help\tShow this help message\n");
 		else if (strcmp(av[1], "-v") == 0)
 		{
 			dest_str = av[2];
 			verbose = 1;
-			// Gestion de l'option -v
 		}
 		else
 		{
@@ -144,6 +142,7 @@ int main(int ac, char **av)
 
 	// construction de icmp
 	build_icmp_packet(&packet);
+	// boucle de ping
 	ping_loop(&packet, sockfd, &dest, verbose);
 
 	close(sockfd);
@@ -206,13 +205,7 @@ int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, 
 				double time_ms = (end.tv_sec - sent_time->tv_sec) * 1000.0
 					+ (end.tv_usec - sent_time->tv_usec) / 1000.0;
 
-				g_stats.packets_received++;
-				g_stats.sum_rtt += time_ms;
-				g_stats.sum_sq_rtt += (time_ms * time_ms);
-				if (g_stats.packets_received == 1 || time_ms < g_stats.min_rtt)
-					g_stats.min_rtt = time_ms;
-				if (time_ms > g_stats.max_rtt)
-					g_stats.max_rtt = time_ms;
+				save_stats_info(time_ms);
 
 				printf("%zd bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
 					bytes_recv - ip_hdr_len,

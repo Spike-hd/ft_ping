@@ -23,7 +23,7 @@ $(OBJDIR):
 
 
 $(NAME): $(OBJS)
-	@$(CC) $(CFLAGS) -o $(NAME) $(OBJS)
+	@$(CC) $(CFLAGS) -o $(NAME) $(OBJS) -lm
 	@echo "✅ $(GREEN)./$(NAME) compiled successfully$(RESET)"
 
 $(OBJDIR)%.o: $(SRCDIR)%.c

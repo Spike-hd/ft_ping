@@ -16,9 +16,9 @@
 typedef struct s_stats {
 	long packets_transmitted;
 	long packets_received;
-	double min_rtt;
-	double max_rtt;
-	double sum_rtt;
+	double rtt_min;
+	double rtt_max;
+	double sum_time;
 	double sum_sq_rtt;
 	struct timeval start_time;
 	char *dest_name;
