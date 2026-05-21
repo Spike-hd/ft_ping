@@ -161,12 +161,22 @@ int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, 
 
 				save_stats_info(time_ms);
 
-				printf("%zd bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
-					icmp_len,
-					inet_ntoa(sender.sin_addr),
-					ntohs(recv_packet->seq),
-					ip_hdr_recv->ip_ttl,
-					time_ms);
+				if (verbose) {
+					printf("%zd bytes from %s: icmp_seq=%u ident=%u ttl=%d time=%.3f ms\n",
+						icmp_len,
+						inet_ntoa(sender.sin_addr),
+						ntohs(recv_packet->seq),
+						ntohs(recv_packet->id),
+						ip_hdr_recv->ip_ttl,
+						time_ms);
+				} else {
+					printf("%zd bytes from %s: icmp_seq=%u ttl=%d time=%.3f ms\n",
+						icmp_len,
+						inet_ntoa(sender.sin_addr),
+						ntohs(recv_packet->seq),
+						ip_hdr_recv->ip_ttl,
+						time_ms);
+				}
 				
 				// On sort de la boucle de lecture puisqu'on a notre réponse
 				break;
@@ -199,6 +209,7 @@ int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, 
 int main(int ac, char **av)
 {
 	int sockfd;
+	int sockfd6 = -1;
 	struct sockaddr_in dest;
 	struct icmp_packet packet;
 	char *dest_str;
@@ -213,11 +224,16 @@ int main(int ac, char **av)
 		 printf("ping: %s: Name or service not known\n", dest_str);
 		 return 1;
 	}
-	printf("PING %s (%s): %d data bytes\n", dest_str, inet_ntoa(dest.sin_addr), PAYLOAD_SIZE);
-
 	// Calcul du sockfd
 	sockfd = create_socket();
 	if (sockfd < 0) { return error_msg("problem while creating the socket\n");}
+	if (verbose) {
+		sockfd6 = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+		printf("ping: sock4.fd: %d (socktype: SOCK_RAW), sock6.fd: %d (socktype: SOCK_RAW), hints.ai_family: AF_UNSPEC\n\n",
+			sockfd, sockfd6);
+		printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", dest_str);
+	}
+	printf("PING %s (%s): %d(%d) data bytes\n", dest_str, inet_ntoa(dest.sin_addr), PAYLOAD_SIZE, (int)sizeof(struct icmp_packet));
 
 	// On initialise les infos globales juste avant de commencer la boucle
 	g_stats.dest_name = dest_str;
@@ -226,6 +242,8 @@ int main(int ac, char **av)
 	sa.sa_handler = sigint_handler;
 	sigemptyset(&sa.sa_mask);
 	if (sigaction(SIGINT, &sa, NULL) < 0) {
+		if (sockfd6 >= 0)
+			close(sockfd6);
 		close(sockfd);
 		return error_msg("problem while setting signal handler\n");
 	}
@@ -235,6 +253,8 @@ int main(int ac, char **av)
 	// boucle de ping
 	ping_loop(&packet, sockfd, &dest, verbose);
 
+	if (sockfd6 >= 0)
+		close(sockfd6);
 	close(sockfd);
 	if (g_stats.stop)
 		print_stats();
