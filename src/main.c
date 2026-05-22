@@ -94,19 +94,16 @@ void save_stats_info(double time_ms)
 int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, int verbose)
 {
 	struct sockaddr_in sender;
-	socklen_t sender_len;
 	char buffer[1024];
 	struct timeval start, end;
-	uint16_t seq = 0; // On va gérer la séquence directement ici
+	uint16_t seq = 0;
 
 	while (!g_stats.stop) {
 		uint16_t current_seq = seq++;
 
-		// 1. On inscrit le temps actuel dans la payload (data)
+		// On met le temps dans le payload et on recalcule le checksum 
 		gettimeofday(&start, NULL);
 		memcpy(packet->data, &start, sizeof(struct timeval));
-
-		// 2. On finalise l'en-tête (séquence et checksum) avant d'envoyer
 		packet->seq = htons(current_seq);
 		packet->checksum = 0;
 		packet->checksum = icmp_checksum(packet, sizeof(*packet));
@@ -117,9 +114,8 @@ int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, 
 		}
 		g_stats.packets_transmitted++;
 		
-		// BOUCLE INTERNE : On lit jusqu'à avoir notre ECHOREPLY ou un timeout
 		while (!g_stats.stop) {
-			sender_len = sizeof(sender);
+			socklen_t sender_len = sizeof(sender);
 			ssize_t bytes_recv = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr *)&sender, &sender_len);
 			if (bytes_recv < 0) {
 				if (errno == EINTR)
@@ -138,17 +134,15 @@ int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, 
 			if (bytes_recv < (ssize_t)sizeof(struct ip))
 				continue;
 			struct ip *ip_hdr_recv = (struct ip *)buffer;
-			int ip_hdr_len = ip_hdr_recv->ip_hl << 2;
+			int ip_hdr_len = ip_hdr_recv->ip_hl * 4;
 
 			if (ip_hdr_len < (int)sizeof(struct ip)
 				|| bytes_recv < ip_hdr_len + (ssize_t)ICMP_MINLEN)
 				continue;
 			ssize_t icmp_len = bytes_recv - ip_hdr_len;
-
-			// On "calque" notre structure icmp_packet sur la réception
 			struct icmp_packet *recv_packet = (struct icmp_packet *)(buffer + ip_hdr_len);
 
-			// Filtre : est-ce que c'est bien NOTRE réponse ?
+			// Verifie que c'est le bon pid et que c'est une echo reply
 			if (recv_packet->type == ICMP_ECHOREPLY && recv_packet->id == htons(getpid() & 0xFFFF)) {
 				struct timeval sent_time;
 				double time_ms;
@@ -156,8 +150,7 @@ int ping_loop(struct icmp_packet *packet, int sockfd, struct sockaddr_in *dest, 
 				if (bytes_recv < ip_hdr_len + (ssize_t)(ICMP_MINLEN + sizeof(sent_time)))
 					continue;
 				memcpy(&sent_time, recv_packet->data, sizeof(sent_time));
-				time_ms = (end.tv_sec - sent_time.tv_sec) * 1000.0
-					+ (end.tv_usec - sent_time.tv_usec) / 1000.0;
+				time_ms = (end.tv_sec - sent_time.tv_sec) * 1000.0 + (end.tv_usec - sent_time.tv_usec) / 1000.0;
 
 				save_stats_info(time_ms);
 
@@ -222,18 +215,9 @@ int main(int ac, char **av)
 	if (sockfd < 0) { return error_msg("problem while creating the socket\n");}
 	if (verbose) {
 		uint16_t id = getpid() & 0xFFFF;
-
-		printf("PING %s (%s): %d data bytes, id 0x%04x = %u\n",
-			dest_str,
-			inet_ntoa(dest.sin_addr),
-			PAYLOAD_SIZE,
-			id,
-			id);
+		printf("PING %s (%s): %d data bytes, id 0x%04x = %u\n", dest_str, inet_ntoa(dest.sin_addr), PAYLOAD_SIZE, id, id);
 	} else {
-		printf("PING %s (%s): %d data bytes\n",
-			dest_str,
-			inet_ntoa(dest.sin_addr),
-			PAYLOAD_SIZE);
+		printf("PING %s (%s): %d data bytes\n", dest_str, inet_ntoa(dest.sin_addr),PAYLOAD_SIZE);
 	}
 
 	// On initialise les infos globales juste avant de commencer la boucle
